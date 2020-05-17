@@ -20,4 +20,18 @@ namespace PortScan
             return connectTask;
         }
     }
+
+    static class UdpClientExtensions
+    {
+        public static async Task<Task> ConnectAsync(this UdpClient udpClient, IPAddress ipAddr, int port,
+            int timeout = 3000)
+        {
+            udpClient.Connect(ipAddr, port);
+            var sendTask = udpClient.SendAsync(new byte[256], 256);
+            await sendTask;
+            var receiveTask = udpClient.ReceiveAsync();
+            await Task.WhenAny(receiveTask, Task.Delay(timeout));
+            return receiveTask;
+        }
+    }
 }

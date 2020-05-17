@@ -14,7 +14,7 @@ namespace PortScan
             return Task.WhenAll(ipAddrs.Select(async ip =>
             {
                 if (await PingAddr(ip) == IPStatus.Success)
-                    await Task.WhenAll(ports.Select(port => CheckPort(ip, port)));
+                    await Task.WhenAll(ports.Select(port => CheckPortUdp(ip, port)));
             }));
         }
 
@@ -29,7 +29,7 @@ namespace PortScan
             }
         }
 
-        private static async Task CheckPort(IPAddress ipAddr, int port, int timeout = 3000)
+        private static async Task CheckPortTcp(IPAddress ipAddr, int port, int timeout = 3000)
         {
             using(var tcpClient = new TcpClient())
             {
@@ -50,7 +50,61 @@ namespace PortScan
                         break;
                 }
                 Console.WriteLine($"Checked {ipAddr}:{port} - {portStatus}");
-                Console.WriteLine(tcpClient.GetStream());
+
+                if (portStatus == PortStatus.OPEN)
+                {
+                    //TODO: Handle protocol detection
+                    // var data = new byte[256];
+                    // NetworkStream stream = tcpClient.GetStream();
+                    //
+                    // // Send the message to the connected TcpServer.
+                    // stream.Write(data, 0, data.Length);
+                    //
+                    // // Receive the TcpServer.response.
+                    //
+                    // // Buffer to store the response bytes.
+                    // data = new byte[256];
+                    //
+                    // // String to store the response ASCII representation.
+                    // String responseData = String.Empty;
+                    //
+                    // // Read the first batch of the TcpServer response bytes.
+                    // Int32 bytes = stream.Read(data, 0, data.Length);
+                    // responseData = System.Text.Encoding.ASCII.GetString(data, 0, bytes);
+                    // Console.WriteLine("Received: {0}", responseData);
+                    //
+                    // // Close everything.
+                    // stream.Close();
+                }
+            }
+        }
+
+        private static async Task CheckPortUdp(IPAddress ipAddr, int port, int timeout = 3000)
+        {
+            using (var udpClient = new UdpClient())
+            {
+                Console.WriteLine($"Checking {ipAddr}:{port}");
+
+                var connectTask = await udpClient.ConnectAsync(ipAddr, port, timeout);
+                PortStatus portStatus;
+                if (connectTask.Exception != null)
+                {
+                    if (connectTask.Exception.InnerExceptions
+                        .Where(x => x is SocketException)
+                        .Any(x => ((SocketException) x).ErrorCode == 10054)) //WSAECONNRESET
+                        portStatus = PortStatus.CLOSED;
+                    else if (connectTask.Exception.InnerExceptions.Any(x => x is TimeoutException))
+                        portStatus = PortStatus.OPEN;
+                    else
+                        portStatus = PortStatus.FILTERED;
+                }
+                else
+                {
+                    portStatus = PortStatus.OPEN;
+                    //TODO: Analyze protocol
+                }
+                
+                Console.WriteLine($"Checked {ipAddr}:{port} - {portStatus}");
             }
         }
     }

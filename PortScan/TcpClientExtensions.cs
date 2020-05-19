@@ -4,34 +4,21 @@ using System.Threading.Tasks;
 
 namespace PortScan
 {
-    static class TcpClientExtensions
+    public static class TcpClientExtensions
     {
-        public static Task Connect(this TcpClient tcpClient, IPAddress ipAddr, int port, int timeout = 3000)
+        public static async Task<Task> ConnectAsync(this TcpClient tcpClient, IPAddress ipAddr, int port, int timeout = 3000)
         {
-            var connectTask = tcpClient.ConnectAsync(ipAddr, port);
-            Task.WaitAny(connectTask, Task.Delay(timeout));
+            Task connectTask;
+            try
+            {
+                connectTask = tcpClient.ConnectAsync(ipAddr, port);
+            }
+            catch
+            {
+                return Task.FromException(new SocketException());
+            }
+            await connectTask.ThrowAfterTimeout(timeout);
             return connectTask;
-        }
-
-		public static async Task<Task> ConnectAsync(this TcpClient tcpClient, IPAddress ipAddr, int port, int timeout = 3000)
-        {
-            var connectTask = tcpClient.ConnectAsync(ipAddr, port);
-            await Task.WhenAny(connectTask, Task.Delay(timeout));
-            return connectTask;
-        }
-    }
-
-    static class UdpClientExtensions
-    {
-        public static async Task<Task> ConnectAsync(this UdpClient udpClient, IPAddress ipAddr, int port,
-            int timeout = 3000)
-        {
-            udpClient.Connect(ipAddr, port);
-            var sendTask = udpClient.SendAsync(new byte[256], 256);
-            await sendTask;
-            var receiveTask = udpClient.ReceiveAsync();
-            await Task.WhenAny(receiveTask, Task.Delay(timeout));
-            return receiveTask;
         }
     }
 }

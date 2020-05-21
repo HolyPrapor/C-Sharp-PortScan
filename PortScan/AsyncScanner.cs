@@ -125,12 +125,12 @@ namespace PortScan
                 }
                 else
                 {
-                    //Console.WriteLine($"OPENED {port}");
+                    Console.WriteLine($"OPENED {port}");
                     portStatus = PortStatus.OPEN;
                     
                     if (await UdpProtocolChecker.IsNtp(udpClient))
                         protocolType = ProtocolType.NTP;
-                    else
+                    else if (await UdpProtocolChecker.IsDns(udpClient))
                         protocolType = ProtocolType.DNS;
                 }
                 
@@ -142,6 +142,17 @@ namespace PortScan
 
     public static class UdpProtocolChecker
     {
+        private static DateTime GetNetworkTime(byte[] ntpData)
+        {
+            var intPart = (ulong)ntpData[40] << 24 | (ulong)ntpData[41] << 16 | (ulong)ntpData[42] << 8 | ntpData[43];
+            var fractPart = (ulong)ntpData[44] << 24 | (ulong)ntpData[45] << 16 | (ulong)ntpData[46] << 8 | ntpData[47];
+
+            var milliseconds = intPart * 1000 + fractPart * 1000 / 0x100000000L;
+            var networkDateTime = new DateTime(1900, 1, 1).AddMilliseconds((long)milliseconds);
+
+            return networkDateTime;
+        }
+        
         public static async Task<bool> IsNtp(UdpClient udpClient)
         {
             var ntpData = new byte[48];
@@ -149,45 +160,29 @@ namespace PortScan
             //Setting the Leap Indicator, Version Number and Mode values
             ntpData[0] = 0x1B; //LI = 0 (no warning), VN = 3 (IPv4 only), Mode = 3 (Client Mode)
             var responseTask = udpClient.ReceiveAsync();
-            
+
             var responseData = await udpClient.SendAsync(ntpData, ntpData.Length).ThrowAfterTimeout(3000)
                 .ContinueWith(x => responseTask.ThrowAfterTimeout(3000)).Result;
 
-            Console.WriteLine("RECEIVED");
-            if (responseData != responseTask)
-                return false;
-            Console.WriteLine("RECEIVED2");
+            return responseData == responseTask && GetNetworkTime(responseTask.Result.Buffer)
+                .ToLocalTime().Date.Equals(ActualDay.CurrentDateTime.Date);
+        }
+
+        public static async Task<bool> IsDns(UdpClient udpClient)
+        {
+            var dnsData = new byte[50];
+            var randomBytes = BitConverter.GetBytes(new Random().Next());
+            for (var i = 0; i < randomBytes.Length; i++)
+                dnsData[i] = randomBytes[i];
+            var responseTask = udpClient.ReceiveAsync();
             
-            //Offset to get to the "Transmit Timestamp" field (time at which the reply 
-            //departed the server for the client, in 64-bit timestamp format."
-            const byte serverReplyTime = 40;
+            var responseData = await udpClient.SendAsync(dnsData, dnsData.Length).ThrowAfterTimeout(3000)
+                .ContinueWith(x => responseTask.ThrowAfterTimeout(3000)).Result;
 
-            if (responseTask.Result.Buffer.Length < 44)
-                return false;
-            //Get the seconds part
-            ulong intPart = BitConverter.ToUInt32(responseTask.Result.Buffer, serverReplyTime);
-
-            //Get the seconds fraction
-            ulong fractPart = BitConverter.ToUInt32(responseTask.Result.Buffer, serverReplyTime + 4);
-
-            //Convert From big-endian to little-endian
-            intPart = SwapEndianness(intPart);
-            fractPart = SwapEndianness(fractPart);
-
-            var milliseconds = intPart * 1000 + fractPart * 1000 / 0x100000000L;
-
-            //**UTC** time
-            var networkDateTime = new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds((long)milliseconds);
-
-            return networkDateTime.ToLocalTime().Date.Equals(ActualDay.CurrentDateTime.Date);
-            
-            uint SwapEndianness(ulong x)
-            {
-                return (uint) (((x & 0x000000ff) << 24) +
-                               ((x & 0x0000ff00) << 8) +
-                               ((x & 0x00ff0000) >> 8) +
-                               ((x & 0xff000000) >> 24));
-            }   
+            return responseData == responseTask && responseTask.Result.Buffer.Length > 11 && 
+                   responseTask.Result.Buffer[0] == dnsData[0] &&
+                   responseTask.Result.Buffer[1] == dnsData[1]
+                && (responseTask.Result.Buffer[3] & 1) == 1;
         }
     }
 }

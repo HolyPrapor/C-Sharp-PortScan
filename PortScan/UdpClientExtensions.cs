@@ -14,8 +14,7 @@ namespace PortScan
             try
             {
                 udpClient.Connect(ipAddr, port);
-                var sendTask = udpClient.SendAsync(new byte[256], 256);
-                await sendTask;
+                //await udpClient.SendAsync(new byte[256], 256);
                 receiveTask = udpClient.ReceiveAsync();
                 await receiveTask.ThrowAfterTimeout(timeout);
             }

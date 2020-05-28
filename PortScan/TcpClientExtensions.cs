@@ -1,3 +1,4 @@
+using System;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
@@ -12,12 +13,16 @@ namespace PortScan
             try
             {
                 connectTask = tcpClient.ConnectAsync(ipAddr, port);
+                await connectTask.ThrowAfterTimeout(timeout);
             }
-            catch
+            catch (SocketException)
             {
                 return Task.FromException(new SocketException());
             }
-            await connectTask.ThrowAfterTimeout(timeout);
+            catch (TimeoutException)
+            {
+                return Task.FromException(new TimeoutException());
+            }
             return connectTask;
         }
     }

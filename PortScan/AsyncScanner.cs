@@ -2,39 +2,28 @@
  using System.Globalization;
  using System.IO;
  using System.Linq;
-using System.Net;
-using System.Net.NetworkInformation;
-using System.Net.Sockets;
-using System.Threading.Tasks;
+ using System.Net;
+ using System.Net.NetworkInformation;
+ using System.Net.Sockets;
+ using System.Text;
+ using System.Threading.Tasks;
 
-namespace PortScan
+ namespace PortScan
 {
-    public static class ActualDay
-    {
-        public static DateTime CurrentDateTime;
-        static ActualDay()
-        {
-            try
-            {
-                var client = new TcpClient("time.nist.gov", 13);
-                using (var streamReader = new StreamReader(client.GetStream()))
-                {
-                    var response = streamReader.ReadToEnd();
-                    var utcDateTimeString = response.Substring(7, 17);
-                    CurrentDateTime = DateTime.ParseExact(utcDateTimeString, "yy-MM-dd HH:mm:ss",
-                        CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal);
-                }
-            }
-            catch
-            {
-                CurrentDateTime = new DateTime(1900, 1, 1);
-            }
-        }
-    }
-    
-    
     public sealed class AsyncPortScanner : IPortScanner
     {
+        public static byte[] PacketToSend;
+
+        static AsyncPortScanner()
+        {
+            var hex =
+                "130000000000000000000000000000000000000000000000000000000000000000000000000000006f89e91ab6d53bd3";
+            PacketToSend = Enumerable.Range(0, hex.Length)
+                .Where(x => x % 2 == 0)
+                .Select(x => Convert.ToByte(hex.Substring(x, 2), 16))
+                .ToArray();
+        }
+        
         public Task Scan(IPAddress[] ipAddrs, int[] ports, bool scanTcp, bool scanUdp)
         {
             return Task.WhenAll(ipAddrs.Select(async ip =>
@@ -58,7 +47,7 @@ namespace PortScan
             }
         }
 
-        private static async Task CheckPortTcp(IPAddress ipAddr, int port, int timeout = 3000)
+        private static async Task CheckPortTcp(IPAddress ipAddr, int port, int timeout = 2000)
         {
             using(var tcpClient = new TcpClient())
             {
@@ -83,19 +72,37 @@ namespace PortScan
                     var data = new byte[256];
                     using (var stream = tcpClient.GetStream())
                     {
-                        if ((await stream.WriteAsyncTimeout(data, 0, data.Length)).IsCompleted &&
-                            (await stream.ReadAsyncTimeout(data, 0, data.Length)).IsCompleted)
+                        stream.ReadTimeout = timeout;
+                        stream.WriteTimeout = timeout;
+                        var writeTask = stream.WriteAsync(PacketToSend, 0, PacketToSend.Length);
+                        var readTask = stream.ReadAsync(data, 0, data.Length);
+
+                        try
                         {
-                            var responseData = System.Text.Encoding.ASCII.GetString(data, 0,
-                                data.Length).ToLower();
-                            if (responseData.Contains("html"))
-                                protocolType = ProtocolType.HTTP;
-                            else if (responseData.Contains("smtp"))
-                                protocolType = ProtocolType.SMTP;
-                            else if (responseData.Contains("pop3"))
-                                protocolType = ProtocolType.POP3;
-                            else if (responseData.Contains("imap"))
-                                protocolType = ProtocolType.IMAP;
+                            await writeTask;
+                        }
+                        catch (Exception e)
+                        {
+                            //Console.WriteLine(e.Message);
+                        }
+                        
+                        if (writeTask.Status == TaskStatus.RanToCompletion)
+                        {
+                            try
+                            {
+                                await readTask;
+                            }
+                            catch(Exception e)
+                            {
+                                //Console.WriteLine(e.Message);
+                            }
+                            
+                            if(readTask.Status == TaskStatus.RanToCompletion)
+                            {
+                                var length = readTask.Result;
+                                data = data.Take(length).ToArray();
+                                protocolType = ProtocolCheckingUtils.DetectProtocol(data);
+                            }
                         }
                     }
                     Console.WriteLine($"TCP {port} {protocolType}");
@@ -103,86 +110,96 @@ namespace PortScan
             }
         }
 
-        private static async Task CheckPortUdp(IPAddress ipAddr, int port, int timeout = 3000)
+        private static async Task CheckPortUdp(IPAddress ipAddr, int port, int timeout = 2000)
         {
             using (var udpClient = new UdpClient())
             {
-                //Console.WriteLine($"Checking {ipAddr}:{port}");
-
-                var connectTask = await udpClient.ConnectAsync(ipAddr, port, timeout);
+                var connectTask = udpClient.Client.ConnectAsync(ipAddr, port);
                 PortStatus portStatus;
                 ProtocolType? protocolType = null;
-                if (connectTask.Exception != null)
-                {
-                    if (connectTask.Exception.InnerExceptions
+                await Task.WhenAny(Task.Delay(timeout), connectTask);
+                if (connectTask.IsCompleted &&
+                    connectTask.Exception != null && connectTask.Exception.InnerExceptions
                         .Where(x => x is SocketException)
                         .Any(x => ((SocketException) x).ErrorCode == 10054)) //WSAECONNRESET
-                        portStatus = PortStatus.CLOSED;
-                    else if (connectTask.Exception.InnerExceptions.Any(x => x is TimeoutException))
-                        portStatus = PortStatus.OPEN;
-                    else
-                        portStatus = PortStatus.FILTERED;
-                }
+                    portStatus = PortStatus.CLOSED;
                 else
-                {
-                    Console.WriteLine($"OPENED {port}");
                     portStatus = PortStatus.OPEN;
+
+                if (portStatus == PortStatus.OPEN)
+                {
+                    var writeTask = udpClient.SendAsync(PacketToSend, PacketToSend.Length);
+                    var readTask = udpClient.ReceiveAsync();
+                    try
+                    {
+                        await Task.WhenAny(writeTask, Task.Delay(timeout));
+                    }
+                    catch (Exception e)
+                    {
+                        //Console.WriteLine(e);
+                    }
+
+                    if (writeTask.Status == TaskStatus.RanToCompletion)
+                    {
+                        try
+                        {
+                            await Task.WhenAny(readTask, Task.Delay(timeout));
+                        }
+                        catch (Exception e)
+                        {
+                            //Console.WriteLine(e);
+                        }
+
+                        if (readTask.Status == TaskStatus.RanToCompletion)
+                            protocolType = ProtocolCheckingUtils.DetectProtocol(readTask.Result.Buffer);
+                        else
+                            return;
+                    }
+                    else
+                        return;
                     
-                    if (await UdpProtocolChecker.IsNtp(udpClient))
-                        protocolType = ProtocolType.NTP;
-                    else if (await UdpProtocolChecker.IsDns(udpClient))
-                        protocolType = ProtocolType.DNS;
-                }
-                
-                if (portStatus == PortStatus.OPEN) 
                     Console.WriteLine($"UDP {port} {protocolType}");
+                } 
             }
         }
     }
 
-    public static class UdpProtocolChecker
+    public static class ProtocolCheckingUtils
     {
-        private static DateTime GetNetworkTime(byte[] ntpData)
+        public static ProtocolType? DetectProtocol(byte[] data)
         {
-            var intPart = (ulong)ntpData[40] << 24 | (ulong)ntpData[41] << 16 | (ulong)ntpData[42] << 8 | ntpData[43];
-            var fractPart = (ulong)ntpData[44] << 24 | (ulong)ntpData[45] << 16 | (ulong)ntpData[46] << 8 | ntpData[47];
-
-            var milliseconds = intPart * 1000 + fractPart * 1000 / 0x100000000L;
-            var networkDateTime = new DateTime(1900, 1, 1).AddMilliseconds((long)milliseconds);
-
-            return networkDateTime;
+            var responseData = Encoding.ASCII.GetString(data, 0, data.Length).ToLower();
+            if (responseData.Contains("html"))
+                return ProtocolType.HTTP;
+            if (responseData.Contains("smtp"))
+                return ProtocolType.SMTP;
+            if (responseData.Contains("pop3"))
+                return ProtocolType.POP3;
+            if (responseData.Contains("imap"))
+                return ProtocolType.IMAP;
+            if (IsDnsResponse(data))
+                return ProtocolType.DNS;
+            if (IsNtpResponse(data))
+                return ProtocolType.NTP;
+            return null;
         }
         
-        public static async Task<bool> IsNtp(UdpClient udpClient)
+        public static bool IsDnsResponse(byte[] response)
         {
-            var ntpData = new byte[48];
-
-            //Setting the Leap Indicator, Version Number and Mode values
-            ntpData[0] = 0x1B; //LI = 0 (no warning), VN = 3 (IPv4 only), Mode = 3 (Client Mode)
-            var responseTask = udpClient.ReceiveAsync();
-
-            var responseData = await udpClient.SendAsync(ntpData, ntpData.Length).ThrowAfterTimeout(3000)
-                .ContinueWith(x => responseTask.ThrowAfterTimeout(3000)).Result;
-
-            return responseData == responseTask && GetNetworkTime(responseTask.Result.Buffer)
-                .ToLocalTime().Date.Equals(ActualDay.CurrentDateTime.Date);
+            return response[0] == AsyncPortScanner.PacketToSend[0] &&
+                   response[1] == AsyncPortScanner.PacketToSend[1]
+                   && (response[3] & 1) == 1;
         }
 
-        public static async Task<bool> IsDns(UdpClient udpClient)
+        public static bool IsNtpResponse(byte[] response)
         {
-            var dnsData = new byte[50];
-            var randomBytes = BitConverter.GetBytes(new Random().Next());
-            for (var i = 0; i < randomBytes.Length; i++)
-                dnsData[i] = randomBytes[i];
-            var responseTask = udpClient.ReceiveAsync();
-            
-            var responseData = await udpClient.SendAsync(dnsData, dnsData.Length).ThrowAfterTimeout(3000)
-                .ContinueWith(x => responseTask.ThrowAfterTimeout(3000)).Result;
-
-            return responseData == responseTask && responseTask.Result.Buffer.Length > 11 && 
-                   responseTask.Result.Buffer[0] == dnsData[0] &&
-                   responseTask.Result.Buffer[1] == dnsData[1]
-                && (responseTask.Result.Buffer[3] & 1) == 1;
+            if (response.Length <= 39)
+                return false;
+            for(var i = 0; i < 8; i++)
+                if (AsyncPortScanner.PacketToSend[40 + i] != response[24 + i])
+                    return false;
+            return (response[0] & 7) == 4 &&
+                   ((response[0] >> 3) & 7) == 2;
         }
     }
 }

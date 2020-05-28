@@ -13,5 +13,14 @@ namespace PortScan
                 throw new TimeoutException();
             return result;
         }
+        
+        public static async Task<T> ThrowAfterTimeout<T>(this Task<T> task, int timeout)
+        {
+            var delayTask = Task.Delay(timeout);
+            var result = await Task.WhenAny(task, delayTask);
+            if(result == delayTask)
+                throw new TimeoutException();
+            return task.Result;
+        }
     }
 }

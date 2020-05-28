@@ -18,7 +18,15 @@ namespace PortScan
 				Console.WriteLine("-u for UDP");
 				return;
 			}
-			var ipAddr = IPAddress.Parse(args[0]);
+			IPAddress ipAddr;
+			try
+			{
+				ipAddr = IPAddress.Parse(args[0]);
+			}
+			catch
+			{
+				ipAddr = Dns.GetHostAddresses(args[0])[0];
+			}
 			var tcpCheck = false;
 			var udpCheck = false;
 			var portStart = 1;
